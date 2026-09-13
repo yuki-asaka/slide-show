@@ -1,0 +1,71 @@
+# 謝恩会スライドショー 設定ファイル
+#
+# ここを編集して `python3 build_video.py --config config/slides.yaml` を実行すると
+# output/ 以下にMP4動画が生成されます。
+# 素材（写真・動画・BGM）は assets/photos, assets/videos, assets/bgm に置いてください。
+
+output:
+  file: output/謝恩会スライドショー.mp4
+  width: 1920
+  height: 1080
+  fps: 30
+
+caption:
+  # macOSのfontconfig経由でフォント名を指定（環境によっては font_file 指定の方が確実）
+  font: "Hiragino Sans"
+  # font_file: assets/fonts/NotoSansJP-Bold.otf
+
+defaults:
+  photo_duration: 4        # 写真1枚あたりの表示秒数（duration未指定時）
+  effect: kenburns-in       # none / kenburns-in / kenburns-out / pan-left / pan-right / pan-up / pan-down
+  transition: fade          # none / fade / wipeleft / wiperight / slideup / slidedown / circleopen など（ffmpeg xfade準拠）
+  transition_duration: 1.0  # トランジションの長さ（秒）
+
+bgm:
+  file: assets/bgm/theme.mp3
+  volume: 0.8
+  fade_in: 2
+  fade_out: 3
+
+slides:
+  # --- オープニング ---
+  - type: photo
+    file: assets/photos/001_entrance.jpg
+    duration: 5
+    effect: kenburns-in
+    caption:
+      text: "入学式"
+      position: bottom
+
+  # --- 行事の思い出 ---
+  - type: photo
+    file: assets/photos/002_sports_day.jpg
+    effect: pan-left
+    caption:
+      text: "体育祭"
+      position: bottom
+
+  - type: video
+    file: assets/videos/003_culture_festival.mp4
+    # duration省略時は動画の長さをそのまま使用
+    transition: wipeleft
+    caption:
+      text: "文化祭"
+      position: top
+
+  - type: photo
+    file: assets/photos/004_trip.jpg
+    effect: pan-right
+    caption:
+      text: "修学旅行"
+
+  # --- エンディング ---
+  - type: photo
+    file: assets/photos/099_graduation.jpg
+    duration: 6
+    effect: kenburns-out
+    transition: fade
+    transition_duration: 1.5
+    caption:
+      text: "卒業、おめでとう"
+      position: center

@@ -1,0 +1,13 @@
+[project]
+name = "slide-show"
+version = "0.1.0"
+description = "写真・動画・BGM・字幕からKen Burns/クロスフェード付きのスライドショー動画を生成するツール"
+requires-python = ">=3.14"
+dependencies = [
+    "PyYAML>=6.0",
+    "Pillow>=10.0",
+    "pillow-heif>=0.18",
+]
+
+[tool.uv]
+package = false

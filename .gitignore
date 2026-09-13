@@ -1,0 +1,12 @@
+.venv/
+__pycache__/
+*.pyc
+.DS_Store
+
+# 個人情報を含むため、雛形の slides.yaml 以外はコミットしない
+config/*.yaml
+!config/slides.yaml
+
+# 生成物（個人情報を含む）はコミットしない
+output/*
+!output/.gitkeep

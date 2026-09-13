@@ -1,0 +1,12 @@
+services:
+  slide-show:
+    build:
+      context: .
+      args:
+        UID: ${UID:-1000}
+        GID: ${GID:-1000}
+    volumes:
+      - ./config:/work/config
+      - ./assets:/work/assets
+      - ./output:/work/output
+    command: ["--config", "config/slides.yaml"]
