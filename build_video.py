@@ -1390,7 +1390,11 @@ def main() -> None:
     args = parser.parse_args()
 
     if shutil.which("ffmpeg") is None:
-        print("エラー: ffmpeg が見つかりません。`brew install ffmpeg` などでインストールしてください。", file=sys.stderr)
+        print(
+            "エラー: ffmpeg が見つかりません。"
+            "OSのパッケージマネージャでインストールするか、Docker実行（README参照）を利用してください。",
+            file=sys.stderr,
+        )
         sys.exit(1)
 
     config_path = args.config.resolve()
