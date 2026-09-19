@@ -632,7 +632,14 @@ def zoompan_expr(effect: str, frames: int, fps: int = 30, min_hold_seconds: floa
     # ZOOMを大きくしすぎると停止中ずっと「何の写真か分からない」ほど寄ってしまう。
     # pan-*も停止区間を含め全編この倍率を保持するため、控えめな値にしている。
     ZOOM = 0.08
-    if effect == "kenburns-in":
+    if effect == "none":
+        # 動きなし(静止)の場合もzoompan+trim+setptsに通す。単純なscale/crop/fpsだけの
+        # パイプラインは、多入力のfilter_complexで多数のスライドを連結すると
+        # (原因はffmpeg内部と推測されるが)フレーム数がわずかに不足し、動画全体が
+        # 尺どおりに生成されない不具合が実測で確認された。zoompanは入力フレーム数に
+        # 依存せず d フレームを確定的に生成するため、この経路なら発生しない。
+        z, x, y = "1", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
+    elif effect == "kenburns-in":
         z, x, y = f"1+{ZOOM}*{ease}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
     elif effect == "kenburns-out":
         z, x, y = f"{1 + ZOOM}-{ZOOM}*{ease}", "iw/2-(iw/zoom/2)", "ih/2-(ih/zoom/2)"
@@ -817,25 +824,27 @@ def build_segment_filter(
     if slide.kind == "photo":
         frames = max(1, round(slide.duration * fps))
         zp = zoompan_expr(slide.effect, frames, fps, next_transition_duration)
-        if zp:
-            steps.append(f"scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase")
-            steps.append(f"crop={w * 2}:{h * 2}")
-            steps.append(f"zoompan={zp}:d={frames}:s={w}x{h}:fps={fps}")
-            # -loop 1 の静止画はデフォルトフレームレート(25fps)で複製入力されるため、
-            # zoompan はその入力フレームごとに d フレームを生成してしまい、
-            # 本来の再生時間より大幅に長い(かつ同じ動きを繰り返す)クリップになる。
-            # trim で意図したフレーム数に強制的に切り詰めて防ぐ。
-            steps.append(f"trim=start_frame=0:end_frame={frames}")
-            steps.append("setpts=PTS-STARTPTS")
-            steps.append(f"fps={fps}")
-        else:
-            steps.append(f"scale={w}:{h}:force_original_aspect_ratio=increase")
-            steps.append(f"crop={w}:{h}")
-            steps.append(f"fps={fps}")
+        steps.append(f"scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase")
+        steps.append(f"crop={w * 2}:{h * 2}")
+        steps.append(f"zoompan={zp}:d={frames}:s={w}x{h}:fps={fps}")
+        # -loop 1 の静止画はデフォルトフレームレート(25fps)で複製入力されるため、
+        # zoompan はその入力フレームごとに d フレームを生成してしまい、
+        # 本来の再生時間より大幅に長い(かつ同じ動きを繰り返す)クリップになる。
+        # trim で意図したフレーム数に強制的に切り詰めて防ぐ。
+        steps.append(f"trim=start_frame=0:end_frame={frames}")
+        steps.append("setpts=PTS-STARTPTS")
+        steps.append(f"fps={fps}")
     elif slide.kind == "title":
-        # 背景画像がある場合は敷き詰め、ない場合は単色(すでにWxH丁度のcolorソース)
-        steps.append(f"scale={w}:{h}:force_original_aspect_ratio=increase")
-        steps.append(f"crop={w}:{h}")
+        # 背景画像がある場合は敷き詰め、ない場合は単色(すでにWxH丁度のcolorソース)。
+        # 単純なscale/crop/fpsだけだとphotoと同じ理由でフレーム数が不足しうるため、
+        # photoと同じくzoompan(動きなし)+trim+setptsで確定的なフレーム数にする。
+        frames = max(1, round(slide.duration * fps))
+        zp = zoompan_expr("none", frames, fps)
+        steps.append(f"scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase")
+        steps.append(f"crop={w * 2}:{h * 2}")
+        steps.append(f"zoompan={zp}:d={frames}:s={w}x{h}:fps={fps}")
+        steps.append(f"trim=start_frame=0:end_frame={frames}")
+        steps.append("setpts=PTS-STARTPTS")
         steps.append(f"fps={fps}")
         steps.append(build_title_filter(slide, cfg, tmp_dir, idx))
         steps.append(f"fade=t=in:st=0:d={slide.title_fade_duration}")
@@ -1344,7 +1353,7 @@ def build_film_scroll_ffmpeg_command(
 ) -> list[str]:
     cmd = ["ffmpeg", "-y"]
     for canvas_path in canvas_paths:
-        cmd += ["-loop", "1", "-t", f"{total_duration:.3f}", "-i", str(canvas_path)]
+        cmd += ["-loop", "1", "-r", str(cfg.fps), "-t", f"{total_duration:.3f}", "-i", str(canvas_path)]
     if cfg.bgm:
         cmd += ["-stream_loop", "-1", "-i", str(cfg.bgm.path)]
 
@@ -1378,19 +1387,19 @@ def build_ffmpeg_command(
                 # 静止画のようにloopで引き延ばす必要がない。
                 cmd += ["-i", str(slide.path)]
             else:
-                cmd += ["-loop", "1", "-t", f"{slide.duration}", "-i", str(slide.path)]
+                cmd += ["-loop", "1", "-r", str(cfg.fps), "-t", f"{slide.duration}", "-i", str(slide.path)]
         elif slide.kind == "title":
             if slide.path is not None:
-                cmd += ["-loop", "1", "-t", f"{slide.duration}", "-i", str(slide.path)]
+                cmd += ["-loop", "1", "-r", str(cfg.fps), "-t", f"{slide.duration}", "-i", str(slide.path)]
             else:
                 cmd += [
                     "-f", "lavfi", "-i",
-                    f"color=c={slide.title_bg_color}:s={cfg.width}x{cfg.height}:d={slide.duration}",
+                    f"color=c={slide.title_bg_color}:s={cfg.width}x{cfg.height}:d={slide.duration}:r={cfg.fps}",
                 ]
         else:
             cmd += ["-i", str(slide.path)]
     for path, duration in extra_inputs:
-        cmd += ["-loop", "1", "-t", f"{duration}", "-i", str(path)]
+        cmd += ["-loop", "1", "-r", str(cfg.fps), "-t", f"{duration}", "-i", str(path)]
     if cfg.bgm:
         cmd += ["-stream_loop", "-1", "-i", str(cfg.bgm.path)]
 
@@ -1509,7 +1518,7 @@ def run_post_effects(cfg: Config, base_video: Path, total_duration: float, tmp_d
         stage_label = "postout"
 
     for path in extra_paths:
-        cmd += ["-loop", "1", "-t", f"{total_duration:.3f}", "-i", str(path)]
+        cmd += ["-loop", "1", "-r", str(fps), "-t", f"{total_duration:.3f}", "-i", str(path)]
 
     filter_script = tmp_dir / "post_effects_filter.txt"
     filter_script.write_text(";\n".join(filter_parts), encoding="utf-8")
