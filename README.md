@@ -268,6 +268,32 @@ slides:
 - 停止位置に近づくほどゆっくりになるイージング（ease-out）でスライドインします。
 - 背景色は `defaults.frame_background`（既定 `#000000`）で変更できます。
 
+### 奥行きのある動き（`effect: parallax`）
+
+AI（深度推定モデル）で写真の奥行きを推定し、手前のものほど大きく・奥のものほど
+小さく水平方向に動かすことで、1枚の写真からKen Burnsより立体感のある動きを
+作る効果です。
+
+```yaml
+slides:
+  - type: photo
+    file: assets/photos/001.jpg
+    effect: parallax
+```
+
+- 内部的に [Depth Anything V2 Small](https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf)
+  で深度マップを推定し、Python側で1フレームずつ視差ワープした画像を書き出してから
+  ffmpegでエンコードします。**初回実行時にモデル（約100MB）をHugging Faceから
+  ダウンロードします**（インターネット接続が必要）。
+- `torch`/`transformers` という重い依存が追加されるため、`uv sync` の初回ダウンロード
+  容量・時間が増えます（`parallax` を使わない場合でも依存関係としては導入されます）。
+- Apple Silicon Macで `uv run` を使ってネイティブ実行した場合はMPSで高速に処理されます。
+  **Docker（Linuxコンテナ）で実行するとMPSが使えずCPUのみになるため、大幅に遅くなります**
+  （[Macで使うメリット](#dockerで使う)も参照）。
+- 深度推定＋フレーム生成を1枚ずつ行うため、他のエフェクトより生成が遅くなります。
+  ハイライトにしたい数枚に絞って使うのがおすすめです。
+- `style: photo_pile` / `collage` / `film_scroll` では他のエフェクトと同様に無視されます。
+
 ### ぶれて退場（`effect: shake-exit-left` / `shake-exit-right`）
 
 表示の終盤で左右に素早くぶれたあと、画面外へ加速しながらフェードアウトしていく

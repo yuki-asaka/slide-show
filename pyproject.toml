@@ -7,6 +7,8 @@ dependencies = [
     "PyYAML>=6.0",
     "Pillow>=10.0",
     "pillow-heif>=0.18",
+    "torch>=2.2",
+    "transformers>=4.40",
 ]
 
 [tool.uv]
