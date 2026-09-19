@@ -462,6 +462,42 @@ slides:
 - `duration` を省略すると `defaults.title_duration`（既定3秒）が使われます。
 - `type: title` の `effect` / `caption` は無視されます。
 
+## 長い動画をパーツ分けして作る（`concat`）
+
+5分を超えるような長い動画を1本の `slides.yaml` で作ろうとすると、写真の指定枚数が
+膨大になり、途中の1枚を差し替えたいだけでも該当箇所を探すのが大変になります。
+そこで、次の2段階構成が使えます。
+
+1. これまで通り `slides:` を使って、パーツごとに個別の動画を作る
+   （例: `config/part1.yaml` → `output/part1.mp4`、`config/part2.yaml` → `output/part2.mp4` ...）
+2. 作成済みのパーツ動画を、別のYAMLファイルの `concat:` に列挙して1本に結合する
+
+```yaml
+# config/combine.yaml
+output:
+  file: output/full.mp4
+
+concat:
+  - file: output/part1.mp4
+  - file: output/part2.mp4
+  - file: output/part3.mp4
+```
+
+```sh
+uv run build_video.py --config config/combine.yaml
+```
+
+- `concat:` を含むYAMLは、通常の `slides:` 形式とは別モードとして扱われ、`style` や
+  `caption` など他の設定は無視されます。
+- 結合は**ハードカットのみ**です。ffmpegの `concat` デマルサで再エンコードなしに
+  ストリームコピーするため、非常に高速です（クロスフェードでの結合は現時点では
+  非対応です）。
+- 結合する動画はすべて**解像度・fps・音声トラックの有無が一致**している必要があります
+  （パーツを同じ `output.width`/`height`/`fps` で作っていれば自然に揃います）。
+  揃っていない場合はエラーで教えます。
+- パーツのファイルパスも、既定では `assets/`・`output/` 配下に制限されます
+  （[パスの制限について](#パスの制限について--allow-outside-assets)を参照）。
+
 ## 既知の制約・拡張余地
 
 - BGMのみを音声トラックとして使用します。動画素材自体が持つ音声は現状ミュートされます

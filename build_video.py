@@ -11,6 +11,7 @@ Ken Burns/パン/クロスフェード/字幕付きのスライドショー動�
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import random
 import shutil
@@ -177,9 +178,10 @@ def resolve_config_path(
     return resolved
 
 
-def load_config(config_path: Path, allow_outside_assets: bool = False) -> Config:
-    with config_path.open("r", encoding="utf-8") as f:
-        raw = yaml.safe_load(f) or {}
+def load_config(config_path: Path, allow_outside_assets: bool = False, raw: dict | None = None) -> Config:
+    if raw is None:
+        with config_path.open("r", encoding="utf-8") as f:
+            raw = yaml.safe_load(f) or {}
 
     base_dir = config_path.resolve().parent.parent
     assets_root = (base_dir / "assets").resolve()
@@ -405,6 +407,43 @@ def probe_dimensions(path: Path) -> tuple[int, int]:
         sys.exit(1)
     w_str, h_str = result.stdout.strip().split("x")
     return int(w_str), int(h_str)
+
+
+def probe_concat_part_info(path: Path) -> tuple[int, int, float, Optional[tuple[str, str]]]:
+    """concat結合の事前検証用に、解像度・fps・音声パラメータ(あれば)を
+    1回のffprobe呼び出しでまとめて取得する(width, height, fps, (sample_rate, channels)|None)。
+    """
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries",
+         "stream=codec_type,width,height,r_frame_rate,sample_rate,channels",
+         "-of", "json", str(path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not result.stdout.strip():
+        print(f"エラー: {path} の情報を取得できませんでした。\n{result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    try:
+        streams = json.loads(result.stdout).get("streams", [])
+    except json.JSONDecodeError:
+        print(f"エラー: {path} のffprobe出力を解析できませんでした。", file=sys.stderr)
+        sys.exit(1)
+
+    video = next((s for s in streams if s.get("codec_type") == "video"), None)
+    if video is None or "width" not in video or "height" not in video:
+        print(f"エラー: {path} に映像ストリームが見つかりません。", file=sys.stderr)
+        sys.exit(1)
+
+    num, _, den = str(video.get("r_frame_rate", "0/0")).partition("/")
+    den_val = float(den) if den else 1.0
+    if den_val == 0 or float(num) == 0:
+        print(f"エラー: {path} のfpsが不正です(r_frame_rate={video.get('r_frame_rate')})。", file=sys.stderr)
+        sys.exit(1)
+    fps = float(num) / den_val
+
+    audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
+    audio_params = (str(audio.get("sample_rate")), str(audio.get("channels"))) if audio else None
+
+    return video["width"], video["height"], fps, audio_params
 
 
 def normalize_photo(path: Path, tmp_dir: Path, idx: int) -> Path:
@@ -1387,6 +1426,95 @@ def run_post_effects(cfg: Config, base_video: Path, total_duration: float, tmp_d
         sys.exit(result.returncode)
 
 
+def concat_list_escape(path: Path) -> str:
+    """ffmpeg concatデマルサのlistファイル用にパスをエスケープする。"""
+    return "'" + str(path).replace("'", "'\\''") + "'"
+
+
+def run_concat_job(config_path: Path, raw: dict, allow_outside_assets: bool, dry_run: bool) -> None:
+    """既にbuild_video.pyで生成済みの動画ファイル(パーツ)を1本に結合するモード。
+
+    5分を超えるような長い動画を1回のslides.yamlで作ろうとすると、写真の指定枚数が
+    膨大になり差し替え時の見通しが悪くなる。そこで、パーツごとに通常通り
+    (`slides:`を使って)動画を作っておき、それらをこのモードで結合する2段階構成を
+    取れるようにする。既定ではハードカットのみ(ffmpegのconcatデマルサで
+    再エンコードなしにストリームコピー結合)。パーツ間クロスフェードは非対応。
+    """
+    base_dir = config_path.resolve().parent.parent
+    output_root = (base_dir / "output").resolve()
+
+    out = raw.get("output")
+    if not out or not out.get("file"):
+        fail("output.file が指定されていません")
+    output_file = resolve_config_path(base_dir, out["file"], output_root, allow_outside_assets, "output.file")
+
+    parts_raw = raw.get("concat", [])
+    if not parts_raw:
+        fail("concat が1件も指定されていません")
+
+    parts: list[Path] = []
+    for i, p in enumerate(parts_raw):
+        file_val = p if isinstance(p, str) else (p.get("file") if isinstance(p, dict) else None)
+        if not file_val:
+            fail(f"concat[{i}]: file が指定されていません")
+        path = resolve_config_path(base_dir, file_val, output_root, allow_outside_assets, f"concat[{i}].file")
+        if not path.exists():
+            fail(f"concat[{i}]: ファイルが見つかりません: {path}")
+        parts.append(path)
+
+    if len(parts) < 2:
+        fail("concat には2件以上のファイルを指定してください")
+
+    if output_file in parts:
+        fail(f"output.file が concat のパーツと同じファイルを指しています: {output_file}")
+
+    ref_w, ref_h, ref_fps, ref_audio = probe_concat_part_info(parts[0])
+    for path in parts[1:]:
+        w, h, fps, audio = probe_concat_part_info(path)
+        if (w, h) != (ref_w, ref_h):
+            fail(
+                f"concatする動画の解像度が揃っていません: {parts[0]}({ref_w}x{ref_h}) "
+                f"vs {path}({w}x{h})"
+            )
+        if abs(fps - ref_fps) > 0.01:
+            fail(f"concatする動画のfpsが揃っていません: {parts[0]}({ref_fps}) vs {path}({fps})")
+        if audio != ref_audio:
+            fail(
+                f"concatする動画の音声パラメータ(サンプルレート/チャンネル数)が揃っていません: "
+                f"{parts[0]}({ref_audio or 'なし'}) vs {path}({audio or 'なし'})"
+            )
+
+    output_file.parent.mkdir(parents=True, exist_ok=True)
+
+    with tempfile.TemporaryDirectory(prefix="slideshow_concat_") as tmp:
+        list_file = Path(tmp) / "concat_list.txt"
+        list_file.write_text(
+            "\n".join(f"file {concat_list_escape(p)}" for p in parts) + "\n", encoding="utf-8"
+        )
+
+        cmd = [
+            "ffmpeg", "-y", "-f", "concat", "-safe", "0", "-i", str(list_file),
+            "-c", "copy", "-movflags", "+faststart", str(output_file),
+        ]
+
+        print(f"結合するパーツ数: {len(parts)}")
+        print(f"出力先: {output_file}")
+
+        if dry_run:
+            print("\n--- concat list ---")
+            print(list_file.read_text(encoding="utf-8"))
+            print("--- ffmpeg command ---")
+            print(" ".join(cmd))
+            return
+
+        result = subprocess.run(cmd)
+        if result.returncode != 0:
+            print("エラー: ffmpeg の実行に失敗しました。", file=sys.stderr)
+            sys.exit(result.returncode)
+
+        print(f"完成しました: {output_file}")
+
+
 def main() -> None:
     parser = argparse.ArgumentParser(description="YAML設定からスライドショー動画を生成します")
     parser.add_argument("--config", default="config/slides.yaml", type=Path)
@@ -1409,7 +1537,14 @@ def main() -> None:
     config_path = args.config.resolve()
     if not config_path.exists():
         fail(f"設定ファイルが見つかりません: {config_path}")
-    cfg = load_config(config_path, allow_outside_assets=args.allow_outside_assets)
+
+    with config_path.open("r", encoding="utf-8") as f:
+        raw = yaml.safe_load(f) or {}
+    if "concat" in raw:
+        run_concat_job(config_path, raw, args.allow_outside_assets, args.dry_run)
+        return
+
+    cfg = load_config(config_path, allow_outside_assets=args.allow_outside_assets, raw=raw)
 
     if cfg.style == "photo_pile":
         for slide in cfg.slides:
