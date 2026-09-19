@@ -32,7 +32,10 @@ VALID_EFFECTS = {
     "pan-left", "pan-right", "pan-up", "pan-down",
     "focus-in", "frame-slide-up",
     "shake-exit-left", "shake-exit-right",
+    "parallax",
 }
+
+PARALLAX_DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
 VALID_LOOKS = {"none", "vintage"}
 VALID_PARTICLES = {"none", "sakura", "sparkle"}
 VALID_STYLES = {"standard", "photo_pile", "collage", "film_scroll"}
@@ -448,6 +451,109 @@ def normalize_photo(path: Path, tmp_dir: Path, idx: int) -> Path:
     return out_path
 
 
+_parallax_depth_pipeline = None
+
+
+def get_parallax_depth_pipeline():
+    """深度推定モデル(Depth Anything V2 Small)を遅延ロードする(使うスライドがある場合のみ)。
+
+    torch/transformersは重い依存のため、import自体もこの関数の中で行う。
+    """
+    global _parallax_depth_pipeline
+    if _parallax_depth_pipeline is None:
+        import torch
+        from transformers import pipeline
+
+        if torch.backends.mps.is_available():
+            device = "mps"
+        elif torch.cuda.is_available():
+            device = "cuda"
+        else:
+            device = "cpu"
+        print(
+            f"パララックス用の深度推定モデルを準備しています（初回はダウンロードのため時間がかかります。device={device}）...",
+            file=sys.stderr,
+        )
+        _parallax_depth_pipeline = pipeline(task="depth-estimation", model=PARALLAX_DEPTH_MODEL, device=device)
+    return _parallax_depth_pipeline
+
+
+def generate_parallax_clip(slide: Slide, idx: int, cfg: Config, tmp_dir: Path) -> Path:
+    """深度推定で得た奥行きに応じて手前ほど大きく水平移動させる、疑似パララックス
+    動画をあらかじめ生成する。ffmpegのフィルタ式だけでは表現できないピクセル単位の
+    深度依存ワープのため、Python側でフレームを1枚ずつ書き出してからffmpegでPNG連番
+    をエンコードする。PNG連番からのエンコードは入力フレーム数が確定しているため、
+    `-loop 1`の静止画のようにフレーム数がぶれる心配がない。
+    """
+    import numpy as np
+    import torch
+    import torch.nn.functional as Fnn
+
+    w, h, fps = cfg.width, cfg.height, cfg.fps
+    frames = max(1, round(slide.duration * fps))
+    pipe = get_parallax_depth_pipeline()
+
+    # 深度に応じた水平ワープで縁に余白ができるため、少し広めに撮って中央をクロップする。
+    margin = 1.12
+    src_w, src_h = round(w * margin), round(h * margin)
+    img = ImageOps.fit(Image.open(slide.path).convert("RGB"), (src_w, src_h), Image.LANCZOS)
+
+    depth_img = pipe(img)["depth"]
+    depth = np.asarray(depth_img, dtype=np.float32)
+    depth = (depth - depth.min()) / max(float(depth.max() - depth.min()), 1e-6)  # 0=遠 / 1=近
+
+    device = torch.device(pipe.device if isinstance(pipe.device, torch.device) else pipe.device)
+    img_t = torch.from_numpy(np.asarray(img, dtype=np.float32) / 255.0).permute(2, 0, 1).unsqueeze(0).to(device)
+    depth_t = torch.from_numpy(depth).unsqueeze(0).unsqueeze(0).to(device)
+
+    ys, xs = torch.meshgrid(
+        torch.linspace(-1, 1, src_h, device=device),
+        torch.linspace(-1, 1, src_w, device=device),
+        indexing="ij",
+    )
+
+    # 疾走感エフェクト等と同じ、終盤に向かって減速するイーズアウト(3乗)。
+    # 視差量は上品さを優先し控えめ(src幅の3.5%)にしている。
+    max_shift = src_w * 0.035
+    crop_x0, crop_y0 = (src_w - w) // 2, (src_h - h) // 2
+
+    frame_dir = tmp_dir / f"parallax_{idx}_frames"
+    frame_dir.mkdir()
+    for i in range(frames):
+        u = i / max(frames - 1, 1)
+        ease = 1 - (1 - u) ** 3
+        shift_norm = (max_shift * ease / (src_w / 2)) * depth_t
+        grid = torch.stack([xs.unsqueeze(0) - shift_norm.squeeze(1), ys.unsqueeze(0).expand_as(xs.unsqueeze(0))], dim=-1)
+        warped = Fnn.grid_sample(img_t, grid, mode="bilinear", padding_mode="border", align_corners=True)
+        frame = (warped.squeeze(0).permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
+        cropped = frame[crop_y0:crop_y0 + h, crop_x0:crop_x0 + w]
+        Image.fromarray(cropped).save(frame_dir / f"f_{i:05d}.png")
+
+    clip_path = tmp_dir / f"parallax_{idx}.mp4"
+    result = subprocess.run(
+        ["ffmpeg", "-y", "-framerate", str(fps), "-i", str(frame_dir / "f_%05d.png"),
+         "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(fps), str(clip_path)],
+        capture_output=True, text=True,
+    )
+    if result.returncode != 0 or not clip_path.exists():
+        print(f"エラー: パララックス動画を生成できませんでした。\n{result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    return clip_path
+
+
+def build_parallax_chain(slide: Slide, idx: int, cfg: Config, tmp_dir: Path, label: str) -> tuple[str, str]:
+    """generate_parallax_clipで事前生成済みの動画をフィルタ段に取り込む。
+
+    フレーム生成をPNG連番のffmpegエンコードで確定的に行っているため、他のphoto
+    エフェクトと違いtrim/setptsによるフレーム数補正は不要。
+    """
+    steps = ["format=yuv420p", "setsar=1", f"fps={cfg.fps}"]
+    if slide.caption:
+        steps.append(build_caption_filter(slide.caption, cfg, tmp_dir, idx))
+    chain = f"[{idx}:v]" + ",".join(steps) + f"[{label}]"
+    return chain, label
+
+
 def validate_durations(cfg: Config) -> None:
     for i, slide in enumerate(cfg.slides):
         if not slide.duration or slide.duration <= 0:
@@ -656,6 +762,8 @@ def build_segment_filter(
     w, h, fps = cfg.width, cfg.height, cfg.fps
     steps: list[str] = []
 
+    if slide.kind == "photo" and slide.effect == "parallax":
+        return build_parallax_chain(slide, idx, cfg, tmp_dir, label)
     if slide.kind == "photo" and slide.effect == "focus-in":
         return build_focus_in_chain(slide, idx, cfg, tmp_dir, label)
     if slide.kind == "photo" and slide.effect == "frame-slide-up":
@@ -1227,7 +1335,12 @@ def build_ffmpeg_command(
     cmd = ["ffmpeg", "-y"]
     for slide in cfg.slides:
         if slide.kind == "photo":
-            cmd += ["-loop", "1", "-t", f"{slide.duration}", "-i", str(slide.path)]
+            if slide.effect == "parallax":
+                # generate_parallax_clipで既に厳密な長さ・fpsの動画になっているため、
+                # 静止画のようにloopで引き延ばす必要がない。
+                cmd += ["-i", str(slide.path)]
+            else:
+                cmd += ["-loop", "1", "-t", f"{slide.duration}", "-i", str(slide.path)]
         elif slide.kind == "title":
             if slide.path is not None:
                 cmd += ["-loop", "1", "-t", f"{slide.duration}", "-i", str(slide.path)]
@@ -1428,6 +1541,11 @@ def main() -> None:
         for i, slide in enumerate(cfg.slides):
             if slide.kind == "photo" or (slide.kind == "title" and slide.path is not None):
                 slide.path = normalize_photo(slide.path, tmp_dir, i)
+
+        if cfg.style == "standard":
+            for i, slide in enumerate(cfg.slides):
+                if slide.kind == "photo" and slide.effect == "parallax":
+                    slide.path = generate_parallax_clip(slide, i, cfg, tmp_dir)
 
         if cfg.style == "photo_pile":
             filter_complex, total_duration, has_audio, extra_inputs = build_photo_pile_filter_complex(cfg, tmp_dir)
