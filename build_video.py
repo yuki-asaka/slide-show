@@ -33,8 +33,11 @@ VALID_EFFECTS = {
     "pan-left", "pan-right", "pan-up", "pan-down",
     "focus-in", "frame-slide-up",
     "shake-exit-left", "shake-exit-right",
-    "parallax",
+    "parallax", "parallax-left", "parallax-right",
 }
+
+# "parallax" は後方互換のため "parallax-left" のエイリアスとして扱う。
+PARALLAX_EFFECTS = {"parallax", "parallax-left", "parallax-right"}
 
 PARALLAX_DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
 VALID_LOOKS = {"none", "vintage"}
@@ -576,6 +579,8 @@ def generate_parallax_clip(
     # 視差量は上品さを優先し控えめ(src幅の3.5%)にしている。
     max_shift = src_w * 0.035
     crop_x0, crop_y0 = (src_w - w) // 2, (src_h - h) // 2
+    # parallax(後方互換のエイリアス)/parallax-leftは手前が左へ、parallax-rightは右へ動く。
+    sign = 1 if slide.effect == "parallax-right" else -1
 
     # zoompanベースの効果と同じく、終盤は停止させて次スライドのxfadeが動いている
     # 最中に重ならないようにする(次のtransition_durationを内包できる停止区間)。
@@ -586,7 +591,7 @@ def generate_parallax_clip(
     for i in range(frames):
         u = min(i / last, 1.0)
         ease = 1 - (1 - u) ** 3
-        shift_norm = (max_shift * ease / (src_w / 2)) * depth_t
+        shift_norm = (sign * max_shift * ease / (src_w / 2)) * depth_t
         grid = torch.stack([xs.unsqueeze(0) - shift_norm.squeeze(1), ys.unsqueeze(0).expand_as(xs.unsqueeze(0))], dim=-1)
         warped = Fnn.grid_sample(img_t, grid, mode="bilinear", padding_mode="border", align_corners=True)
         frame = (warped.squeeze(0).permute(1, 2, 0).clamp(0, 1) * 255).byte().cpu().numpy()
@@ -850,7 +855,7 @@ def build_segment_filter(
     w, h, fps = cfg.width, cfg.height, cfg.fps
     steps: list[str] = []
 
-    if slide.kind == "photo" and slide.effect == "parallax":
+    if slide.kind == "photo" and slide.effect in PARALLAX_EFFECTS:
         return build_parallax_chain(slide, idx, cfg, tmp_dir, label)
     if slide.kind == "photo" and slide.effect == "focus-in":
         return build_focus_in_chain(slide, idx, cfg, tmp_dir, label)
@@ -1421,7 +1426,7 @@ def build_ffmpeg_command(
     cmd = ["ffmpeg", "-y"]
     for slide in cfg.slides:
         if slide.kind == "photo":
-            if slide.effect == "parallax":
+            if slide.effect in PARALLAX_EFFECTS:
                 # generate_parallax_clipで既に厳密な長さ・fpsの動画になっているため、
                 # 静止画のようにloopで引き延ばす必要がない。
                 cmd += ["-i", str(slide.path)]
@@ -1726,7 +1731,7 @@ def main() -> None:
 
         if cfg.style == "standard":
             for i, slide in enumerate(cfg.slides):
-                if slide.kind == "photo" and slide.effect == "parallax":
+                if slide.kind == "photo" and slide.effect in PARALLAX_EFFECTS:
                     next_transition_duration = compute_next_transition_duration(cfg, i)
                     slide.path = generate_parallax_clip(slide, i, cfg, tmp_dir, next_transition_duration)
 
