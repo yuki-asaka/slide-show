@@ -1619,26 +1619,23 @@ def run_concat_job(config_path: Path, raw: dict, allow_outside_assets: bool, dry
     if output_file in parts:
         fail(f"output.file が concat のパーツと同じファイルを指しています: {output_file}")
 
-    ref_w, ref_h, ref_fps, ref_audio = probe_concat_part_info(parts[0])
-    for path in parts[1:]:
-        w, h, fps, audio = probe_concat_part_info(path)
-        if (w, h) != (ref_w, ref_h):
-            fail(
-                f"concatする動画の解像度が揃っていません: {parts[0]}({ref_w}x{ref_h}) "
-                f"vs {path}({w}x{h})"
-            )
-        if abs(fps - ref_fps) > 0.01:
-            fail(f"concatする動画のfpsが揃っていません: {parts[0]}({ref_fps}) vs {path}({fps})")
-        if audio != ref_audio:
-            fail(
-                f"concatする動画の音声パラメータ(サンプルレート/チャンネル数)が揃っていません: "
-                f"{parts[0]}({ref_audio or 'なし'}) vs {path}({audio or 'なし'})"
-            )
+    infos = [probe_concat_part_info(p) for p in parts]
+    ref_w, ref_h, ref_fps, ref_audio = infos[0]
+    needs_normalize = any(
+        (w, h) != (ref_w, ref_h) or abs(fps - ref_fps) > 0.01 or audio != ref_audio
+        for w, h, fps, audio in infos[1:]
+    )
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
 
     with tempfile.TemporaryDirectory(prefix="slideshow_concat_") as tmp:
-        list_file = Path(tmp) / "concat_list.txt"
+        tmp_dir = Path(tmp)
+
+        if needs_normalize:
+            run_concat_normalize(parts, infos, out, output_file, tmp_dir, dry_run)
+            return
+
+        list_file = tmp_dir / "concat_list.txt"
         list_file.write_text(
             "\n".join(f"file {concat_list_escape(p)}" for p in parts) + "\n", encoding="utf-8"
         )
@@ -1664,6 +1661,100 @@ def run_concat_job(config_path: Path, raw: dict, allow_outside_assets: bool, dry
             sys.exit(result.returncode)
 
         print(f"完成しました: {output_file}")
+
+
+def run_concat_normalize(
+    parts: list[Path],
+    infos: list[tuple[int, int, float, Optional[tuple[str, str]]]],
+    out: dict,
+    output_file: Path,
+    tmp_dir: Path,
+    dry_run: bool,
+) -> None:
+    """解像度・fps・音声パラメータが揃っていないパーツを、再エンコードして揃えてから結合する。
+
+    通常のconcat(ストリームコピー)と違い、各パーツを scale+pad でレターボックス
+    しつつ共通のfpsに揃え、ffmpegの`concat`フィルタで結合する。音声を持たない
+    パーツには無音トラックを合成して埋める(いずれかのパーツが音声を持つ場合のみ)。
+    再エンコードが入るため、ストリームコピーより時間がかかる。
+    """
+    target_w = int(out.get("width") or infos[0][0])
+    target_h = int(out.get("height") or infos[0][1])
+    target_fps = float(out.get("fps") or infos[0][2])
+
+    has_any_audio = any(audio is not None for _, _, _, audio in infos)
+
+    cmd = ["ffmpeg", "-y"]
+    for path in parts:
+        cmd += ["-i", str(path)]
+    silent_idx = None
+    if has_any_audio and any(audio is None for _, _, _, audio in infos):
+        cmd += ["-f", "lavfi", "-i", "anullsrc=channel_layout=stereo:sample_rate=48000"]
+        silent_idx = len(parts)
+
+    filters: list[str] = []
+    v_labels: list[str] = []
+    a_labels: list[str] = []
+    for i, (path, (w, h, fps, audio)) in enumerate(zip(parts, infos)):
+        vlabel = f"cv{i}"
+        filters.append(
+            f"[{i}:v]scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+            f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,setsar=1,fps={target_fps}[{vlabel}]"
+        )
+        v_labels.append(vlabel)
+        if has_any_audio:
+            alabel = f"ca{i}"
+            if audio is not None:
+                filters.append(
+                    f"[{i}:a]aformat=sample_rates=48000:channel_layouts=stereo,"
+                    f"asetpts=PTS-STARTPTS[{alabel}]"
+                )
+            else:
+                duration = probe_duration(path)
+                filters.append(
+                    f"[{silent_idx}:a]atrim=duration={duration:.3f},asetpts=PTS-STARTPTS[{alabel}]"
+                )
+            a_labels.append(alabel)
+
+    if has_any_audio:
+        inputs = "".join(f"[{v}][{a}]" for v, a in zip(v_labels, a_labels))
+        filters.append(f"{inputs}concat=n={len(parts)}:v=1:a=1[vout][aout]")
+    else:
+        inputs = "".join(f"[{v}]" for v in v_labels)
+        filters.append(f"{inputs}concat=n={len(parts)}:v=1:a=0[vout]")
+
+    filter_script = tmp_dir / "concat_normalize_filter.txt"
+    filter_script.write_text(";\n".join(filters), encoding="utf-8")
+
+    cmd += ["-filter_complex_script", str(filter_script), "-map", "[vout]"]
+    if has_any_audio:
+        cmd += ["-map", "[aout]"]
+    cmd += [
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(target_fps),
+        "-preset", "medium", "-crf", "18",
+        "-profile:v", "high", "-level:v", "4.1", "-bf", "2",
+    ]
+    if has_any_audio:
+        cmd += ["-c:a", "aac", "-b:a", "192k"]
+    cmd += ["-movflags", "+faststart", str(output_file)]
+
+    print(f"結合するパーツ数: {len(parts)}（解像度/fps/音声が不揃いのため再エンコードして揃えます）")
+    print(f"出力先: {output_file}")
+    print(f"揃える仕様: {target_w}x{target_h} @ {target_fps}fps")
+
+    if dry_run:
+        print("\n--- filter_complex ---")
+        print(filter_script.read_text(encoding="utf-8"))
+        print("--- ffmpeg command ---")
+        print(" ".join(cmd))
+        return
+
+    result = subprocess.run(cmd)
+    if result.returncode != 0:
+        print("エラー: ffmpeg の実行に失敗しました。", file=sys.stderr)
+        sys.exit(result.returncode)
+
+    print(f"完成しました: {output_file}")
 
 
 def main() -> None:
