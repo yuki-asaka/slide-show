@@ -37,7 +37,15 @@ VALID_EFFECTS = {
 }
 
 # "parallax" は後方互換のため "parallax-left" のエイリアスとして扱う。
-PARALLAX_EFFECTS = {"parallax", "parallax-left", "parallax-right"}
+# VALID_EFFECTSから導出することで、片方だけ更新して不整合になるのを防ぐ。
+PARALLAX_EFFECTS = {e for e in VALID_EFFECTS if e.startswith("parallax")}
+
+# 手前をどちら向きに動かすか(generate_parallax_clipの水平ワープの符号)。
+# 実測(クロスコリレーションによる画素シフト量の計測)で確認済み:
+# +1で画面左へ、-1で画面右へ動く。"parallax"は後方互換のため
+# "parallax-left"と同じ符号(=導入前の挙動)にしている。未知の値が来た場合は
+# KeyErrorで落ちるようにし、新しいバリアント追加時の登録漏れを検知する。
+PARALLAX_SIGN = {"parallax": 1, "parallax-left": 1, "parallax-right": -1}
 
 PARALLAX_DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
 VALID_LOOKS = {"none", "vintage"}
@@ -579,8 +587,7 @@ def generate_parallax_clip(
     # 視差量は上品さを優先し控えめ(src幅の3.5%)にしている。
     max_shift = src_w * 0.035
     crop_x0, crop_y0 = (src_w - w) // 2, (src_h - h) // 2
-    # parallax(後方互換のエイリアス)/parallax-leftは手前が左へ、parallax-rightは右へ動く。
-    sign = 1 if slide.effect == "parallax-right" else -1
+    sign = PARALLAX_SIGN[slide.effect]
 
     # zoompanベースの効果と同じく、終盤は停止させて次スライドのxfadeが動いている
     # 最中に重ならないようにする(次のtransition_durationを内包できる停止区間)。
@@ -1706,10 +1713,20 @@ def main() -> None:
         for slide in cfg.slides:
             if slide.kind != "photo":
                 fail("style=photo_pile では type=photo 以外のスライドは使用できません")
+            if slide.effect in PARALLAX_EFFECTS:
+                fail(
+                    f"style=photo_pile では effect: {slide.effect} は使用できません"
+                    "（事前レンダリングした動画クリップをloopなしで渡す実装のため、正しく動作しません）"
+                )
     elif cfg.style == "collage":
         for slide in cfg.slides:
             if slide.kind != "photo":
                 fail("style=collage では type=photo 以外のスライドは使用できません")
+            if slide.effect in PARALLAX_EFFECTS:
+                fail(
+                    f"style=collage では effect: {slide.effect} は使用できません"
+                    "（事前レンダリングした動画クリップをloopなしで渡す実装のため、正しく動作しません）"
+                )
     elif cfg.style == "film_scroll":
         for slide in cfg.slides:
             if slide.kind != "photo":
