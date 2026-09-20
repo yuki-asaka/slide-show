@@ -733,17 +733,26 @@ def build_focus_in_chain(slide: Slide, idx: int, cfg: Config, tmp_dir: Path, lab
     変わってしまい、一部の環境でストリームが1フレーム目で止まる問題があるため、
     サイズは常に一定に保ち、ぼかした版とシャープな版を fade(alpha) でクロス
     ディゾルブする方式にしている。
+
+    単純なscale/crop/fpsだけのパイプラインは、多入力のfilter_complexで多数の
+    スライドを連結するとフレーム数がわずかに不足する既知の不具合があるため
+    (effect:noneやtitle、parallaxと同様)、zoompan(動きなし)+trim+setptsを
+    経由してから確定的なフレーム数にしている。
     """
     w, h, fps = cfg.width, cfg.height, cfg.fps
     focus_dur = min(1.2, max(slide.duration * 0.5, 0.3))
+    frames = max(1, round(slide.duration * fps))
+    zp = zoompan_expr("none", frames, fps)
 
     sharp, blur_src, blurred, sharp_fade = (
         f"fi_sharp{idx}", f"fi_blursrc{idx}", f"fi_blurred{idx}", f"fi_sharpfade{idx}",
     )
 
     parts = [
-        f"[{idx}:v]scale={w}:{h}:force_original_aspect_ratio=increase,crop={w}:{h},"
-        f"fps={fps},format=rgba,split=2[{sharp}][{blur_src}]",
+        f"[{idx}:v]scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase,crop={w * 2}:{h * 2},"
+        f"zoompan={zp}:d={frames}:s={w}x{h}:fps={fps},"
+        f"trim=start_frame=0:end_frame={frames},setpts=PTS-STARTPTS,fps={fps},"
+        f"format=rgba,split=2[{sharp}][{blur_src}]",
         f"[{blur_src}]boxblur=24:2,format=rgba[{blurred}]",
         f"[{sharp}]fade=t=in:st=0:d={focus_dur:.3f}:alpha=1[{sharp_fade}]",
     ]
