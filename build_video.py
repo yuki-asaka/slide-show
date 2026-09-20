@@ -33,6 +33,7 @@ VALID_EFFECTS = {
     "pan-left", "pan-right", "pan-up", "pan-down",
     "focus-in", "frame-slide-up",
     "shake-exit-left", "shake-exit-right",
+    "mono-fade-out",
     "parallax",
 }
 
@@ -843,6 +844,49 @@ def build_shake_exit_chain(
     return ";\n".join(parts), label
 
 
+def build_mono_fadeout_chain(slide: Slide, idx: int, cfg: Config, tmp_dir: Path, label: str) -> tuple[str, str]:
+    """表示の終盤でゆっくりモノクロ化しながら暗転していく退場効果。
+
+    スライドショー全体の締めくくり(最後のスライド)向けの、ゆったりした終わり方の演出。
+    shake-exitと違い、ほとんどの時間を静止表示のまま過ごすのではなく、durationの
+    終盤(既定は最大2.5秒、durationが短い場合はduration×0.8秒)をまるごと使って
+    彩度を1→0へ線形に落とし(モノクロ化)、その後半でさらに背景色(既定黒)へ
+    フェードアウトする。次のスライドを続ける場合は shake-exit 同様
+    transition: none（ハードカット）が自然。
+    """
+    w, h, fps = cfg.width, cfg.height, cfg.fps
+    duration = slide.duration
+    mono_window = min(2.5, duration * 0.8)
+    mono_start = max(duration - mono_window, 0)
+    fade_dur = max(mono_window * 0.45, 0.3)
+    fade_start = max(duration - fade_dur, mono_start)
+
+    sat_expr = f"if(lt(t,{mono_start:.3f}),1,max(0,1-(t-{mono_start:.3f})/{mono_window:.3f}))"
+
+    # 単純なscale/crop/fpsだけだとeffect:noneや旧titleと同じ理由でフレーム数が
+    # 不足しうる(既知の不具合)ため、zoompan(動きなし)+trim+setptsで
+    # 確定的なフレーム数にしてからhue/fadeを適用する。
+    frames = max(1, round(duration * fps))
+    zp = zoompan_expr("none", frames, fps)
+    steps = [
+        f"scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase",
+        f"crop={w * 2}:{h * 2}",
+        f"zoompan={zp}:d={frames}:s={w}x{h}:fps={fps}",
+        f"trim=start_frame=0:end_frame={frames}",
+        "setpts=PTS-STARTPTS",
+        f"fps={fps}",
+        f"hue=s='{sat_expr}'",
+        f"fade=t=out:st={fade_start:.3f}:d={fade_dur:.3f}:color={cfg.frame_effect_background}",
+        "format=yuv420p",
+        "setsar=1",
+    ]
+    if slide.caption:
+        steps.append(build_caption_filter(slide.caption, cfg, tmp_dir, idx))
+
+    chain = f"[{idx}:v]" + ",".join(steps) + f"[{label}]"
+    return chain, label
+
+
 def build_segment_filter(
     slide: Slide, idx: int, cfg: Config, tmp_dir: Path, next_transition_duration: float = 0.0
 ) -> tuple[str, str]:
@@ -859,6 +903,8 @@ def build_segment_filter(
     if slide.kind == "photo" and slide.effect in ("shake-exit-left", "shake-exit-right"):
         direction = "left" if slide.effect == "shake-exit-left" else "right"
         return build_shake_exit_chain(slide, idx, cfg, tmp_dir, label, direction)
+    if slide.kind == "photo" and slide.effect == "mono-fade-out":
+        return build_mono_fadeout_chain(slide, idx, cfg, tmp_dir, label)
 
     if slide.kind == "photo":
         frames = max(1, round(slide.duration * fps))

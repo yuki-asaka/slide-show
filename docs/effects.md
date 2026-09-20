@@ -125,6 +125,27 @@ slides:
 - **次のスライドの `transition` は `none`（ハードカット）にするのがおすすめです。**
   フェードアウトの直後に通常のクロスフェードが重なると見た目が濁ります。
 
+## モノクロ暗転で締める（`effect: mono-fade-out`）
+
+スライドショー全体の締めくくりに向いた、ゆっくりとした終わり方の演出です。
+durationの終盤をまるごと使って徐々にモノクロ化し、そのまま暗転します。
+
+```yaml
+slides:
+  - type: photo
+    file: assets/photos/099.jpg
+    duration: 6
+    effect: mono-fade-out
+    transition: none    # 暗転の直後はハードカット、または続きがない最後のスライド向け
+```
+
+- `duration` の終盤（最大2.5秒、durationが短い場合はduration×0.8秒）をかけて
+  彩度を徐々に落とし（モノクロ化）、その後半でさらに暗転します。
+- 暗転先の色は `defaults.frame_background`（既定 `#000000`）です。
+- `shake-exit-left`/`shake-exit-right` と同様、この効果のあとに別のスライドを
+  続けるなら `transition: none` がおすすめです。スライドショーの最後のスライドに
+  使うのが最も自然です。
+
 ## 疾走感のあるスライドショー
 
 新しいスタイルではなく、既存の `standard` スタイルの設定の組み合わせ方のコツです。
