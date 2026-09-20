@@ -695,6 +695,30 @@ def zoompan_expr(effect: str, frames: int, fps: int = 30, min_hold_seconds: floa
     return f"z='{z}':x='{x}':y='{y}'"
 
 
+def build_frame_exact_zoompan(
+    w: int, h: int, fps: int, frames: int, effect: str, min_hold_seconds: float = 0.0, margin: float = 2.0
+) -> str:
+    """zoompan+trim+setpts+fpsで、確定的にframes枚のフレームを生成するフィルタ断片を組み立てる。
+
+    単純なscale/crop/fpsだけのパイプラインは、多入力のfilter_complexで多数の
+    スライドを連結するとフレーム数がわずかに不足する既知の不具合がある(CLAUDE.md
+    参照)。zoompanは入力フレーム数に依存せずdフレームを確定的に生成するため、
+    trim+setptsと組み合わせてこの経路で回避する。photo/title/focus-inの3箇所で
+    ほぼ同一のシーケンスを個別に書いていたため、ここに集約した。
+
+    marginは実際にズームする効果(kenburns/pan)がzoom>1の範囲で解像度を超えない
+    ための余白。ズームしない効果(none/title/focus-inの下地など)ではmargin=1で
+    余分なリサンプルを避けられる。
+    """
+    zp = zoompan_expr(effect, frames, fps, min_hold_seconds)
+    mw, mh = round(w * margin), round(h * margin)
+    return (
+        f"scale={mw}:{mh}:force_original_aspect_ratio=increase,crop={mw}:{mh},"
+        f"zoompan={zp}:d={frames}:s={w}x{h}:fps={fps},"
+        f"trim=start_frame=0:end_frame={frames},setpts=PTS-STARTPTS,fps={fps}"
+    )
+
+
 def build_caption_filter(caption: Caption, cfg: Config, tmp_dir: Path, idx: int) -> str:
     caption_file = tmp_dir / f"caption_{idx}.txt"
     caption_file.write_text(caption.text, encoding="utf-8")
@@ -736,23 +760,24 @@ def build_focus_in_chain(slide: Slide, idx: int, cfg: Config, tmp_dir: Path, lab
 
     単純なscale/crop/fpsだけのパイプラインは、多入力のfilter_complexで多数の
     スライドを連結するとフレーム数がわずかに不足する既知の不具合があるため
-    (effect:noneやtitle、parallaxと同様)、zoompan(動きなし)+trim+setptsを
-    経由してから確定的なフレーム数にしている。
+    (effect:noneやtitleと同様)、zoompan(動きなし)+trim+setptsを経由してから
+    確定的なフレーム数にしている(parallaxはPNG連番からの確定的なエンコードで
+    そもそもこの問題が起きないため、この経路は使っていない)。
     """
     w, h, fps = cfg.width, cfg.height, cfg.fps
     focus_dur = min(1.2, max(slide.duration * 0.5, 0.3))
     frames = max(1, round(slide.duration * fps))
-    zp = zoompan_expr("none", frames, fps)
+    slide.duration = frames / fps
 
     sharp, blur_src, blurred, sharp_fade = (
         f"fi_sharp{idx}", f"fi_blursrc{idx}", f"fi_blurred{idx}", f"fi_sharpfade{idx}",
     )
 
+    # focus-inはズームしないため、kenburns/pan用の2倍マージン(margin既定値)は
+    # 不要(margin=1で無駄なリサンプルを避ける)。
+    anchored = build_frame_exact_zoompan(w, h, fps, frames, "none", margin=1.0)
     parts = [
-        f"[{idx}:v]scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase,crop={w * 2}:{h * 2},"
-        f"zoompan={zp}:d={frames}:s={w}x{h}:fps={fps},"
-        f"trim=start_frame=0:end_frame={frames},setpts=PTS-STARTPTS,fps={fps},"
-        f"format=rgba,split=2[{sharp}][{blur_src}]",
+        f"[{idx}:v]{anchored},format=rgba,split=2[{sharp}][{blur_src}]",
         f"[{blur_src}]boxblur=24:2,format=rgba[{blurred}]",
         f"[{sharp}]fade=t=in:st=0:d={focus_dur:.3f}:alpha=1[{sharp_fade}]",
     ]
@@ -870,30 +895,20 @@ def build_segment_filter(
         return build_shake_exit_chain(slide, idx, cfg, tmp_dir, label, direction)
 
     if slide.kind == "photo":
-        frames = max(1, round(slide.duration * fps))
-        zp = zoompan_expr(slide.effect, frames, fps, next_transition_duration)
-        steps.append(f"scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase")
-        steps.append(f"crop={w * 2}:{h * 2}")
-        steps.append(f"zoompan={zp}:d={frames}:s={w}x{h}:fps={fps}")
         # -loop 1 の静止画はデフォルトフレームレート(25fps)で複製入力されるため、
         # zoompan はその入力フレームごとに d フレームを生成してしまい、
         # 本来の再生時間より大幅に長い(かつ同じ動きを繰り返す)クリップになる。
-        # trim で意図したフレーム数に強制的に切り詰めて防ぐ。
-        steps.append(f"trim=start_frame=0:end_frame={frames}")
-        steps.append("setpts=PTS-STARTPTS")
-        steps.append(f"fps={fps}")
+        # build_frame_exact_zoompan内のtrimで意図したフレーム数に強制的に
+        # 切り詰めて防ぐ(margin既定の2倍はkenburns/panのズーム余白として必要)。
+        frames = max(1, round(slide.duration * fps))
+        steps.append(build_frame_exact_zoompan(w, h, fps, frames, slide.effect, next_transition_duration))
     elif slide.kind == "title":
         # 背景画像がある場合は敷き詰め、ない場合は単色(すでにWxH丁度のcolorソース)。
         # 単純なscale/crop/fpsだけだとphotoと同じ理由でフレーム数が不足しうるため、
-        # photoと同じくzoompan(動きなし)+trim+setptsで確定的なフレーム数にする。
+        # photoと同じくzoompan(動きなし)+trim+setptsで確定的なフレーム数にする
+        # (ズームしないのでmargin=1で余分なリサンプルを避ける)。
         frames = max(1, round(slide.duration * fps))
-        zp = zoompan_expr("none", frames, fps)
-        steps.append(f"scale={w * 2}:{h * 2}:force_original_aspect_ratio=increase")
-        steps.append(f"crop={w * 2}:{h * 2}")
-        steps.append(f"zoompan={zp}:d={frames}:s={w}x{h}:fps={fps}")
-        steps.append(f"trim=start_frame=0:end_frame={frames}")
-        steps.append("setpts=PTS-STARTPTS")
-        steps.append(f"fps={fps}")
+        steps.append(build_frame_exact_zoompan(w, h, fps, frames, "none", margin=1.0))
         steps.append(build_title_filter(slide, cfg, tmp_dir, idx))
         steps.append(f"fade=t=in:st=0:d={slide.title_fade_duration}")
     else:
