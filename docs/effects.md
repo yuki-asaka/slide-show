@@ -78,17 +78,18 @@ slides:
 - 停止位置に近づくほどゆっくりになるイージング（ease-out）でスライドインします。
 - 背景色は `defaults.frame_background`（既定 `#000000`）で変更できます。
 
-## 奥行きのある動き（`effect: parallax`）
+## 奥行きのある動き（`effect: parallax-left` / `parallax-right`）
 
 AI（深度推定モデル）で写真の奥行きを推定し、手前のものほど大きく・奥のものほど
 小さく水平方向に動かすことで、1枚の写真からKen Burnsより立体感のある動きを
-作る効果です。
+作る効果です。`parallax-left` は手前が左へ、`parallax-right` は右へ動きます
+（`parallax` は `parallax-left` の旧名で、後方互換のため引き続き使えます）。
 
 ```yaml
 slides:
   - type: photo
     file: assets/photos/001.jpg
-    effect: parallax
+    effect: parallax-left   # または parallax-right
 ```
 
 - 内部的に [Depth Anything V2 Small](https://huggingface.co/depth-anything/Depth-Anything-V2-Small-hf)

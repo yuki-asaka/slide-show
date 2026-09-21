@@ -146,9 +146,9 @@ caption:
 - **任意パスへのアクセスのしやすさ**: `~/Pictures/...`のようなプロジェクト外のフォルダを
   直接参照する場合、ネイティブなら`--allow-outside-assets`だけで済みますが、Dockerだと
   そのフォルダを追加でボリュームマウントする設定がもう一手間必要です。
-- **`effect: parallax`のGPU高速化**: Apple SiliconのMPSはDockerコンテナからは使えないため、
-  ネイティブ実行でないと高速化の恩恵を受けられません（詳細は
-  [見た目のバリエーション](effects.md#奥行きのある動きeffect-parallax)を参照）。
+- **`effect: parallax-left` / `parallax-right`のGPU高速化**: Apple SiliconのMPSはDockerコンテナ
+  からは使えないため、ネイティブ実行でないと高速化の恩恵を受けられません（詳細は
+  [見た目のバリエーション](effects.md#奥行きのある動きeffect-parallax-left--parallax-right)を参照）。
 - 開発中に `build_video.py` 自体を編集する場合も、ネイティブならすぐ反映されますが、
   Dockerはイメージの再ビルドが必要です。
 
