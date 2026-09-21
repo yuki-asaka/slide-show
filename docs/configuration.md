@@ -15,7 +15,8 @@ defaults:
   photo_duration: 4             # 写真1枚の表示秒数（各スライドのdurationで上書き可）
   effect: kenburns-in           # none / kenburns-in / kenburns-out / pan-left / pan-right / pan-up / pan-down
                                  # / focus-in / frame-slide-up / parallax-left / parallax-right
-                                 # / shake-exit-left / shake-exit-right（詳細は見た目のバリエーションを参照）
+                                 # / shake-exit-left / shake-exit-right / mono-fade-out
+                                 # （詳細は見た目のバリエーションを参照）
                                  # ※ kenburns-in/out・pan-* は終了フレームに向かって減速するイーズアウトが常に適用されます
   transition: fade              # none / fade / wipeleft / wiperight / slideup / slidedown / circleopen など
   transition_duration: 1.0      # トランジションの長さ（秒）
