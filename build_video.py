@@ -48,6 +48,12 @@ PARALLAX_EFFECTS = {e for e in VALID_EFFECTS if e.startswith("parallax")}
 PARALLAX_SIGN = {"parallax": 1, "parallax-left": 1, "parallax-right": -1}
 
 PARALLAX_DEPTH_MODEL = "depth-anything/Depth-Anything-V2-Small-hf"
+
+# build_ffmpeg_command/build_film_scroll_ffmpeg_command/run_post_effects/
+# 本ファイルの他のエンコード箇所で共通の画質設定(-r/-c:v/-pix_fmtは各呼び出し元で付与)。
+X264_QUALITY_ARGS = ["-preset", "medium", "-crf", "18", "-profile:v", "high", "-level:v", "4.1", "-bf", "2"]
+AAC_ENCODE_ARGS = ["-c:a", "aac", "-b:a", "192k"]
+
 VALID_LOOKS = {"none", "vintage"}
 VALID_PARTICLES = {"none", "sakura", "sparkle"}
 VALID_STYLES = {"standard", "photo_pile", "collage", "film_scroll"}
@@ -423,13 +429,23 @@ def probe_dimensions(path: Path) -> tuple[int, int]:
     return int(w_str), int(h_str)
 
 
-def probe_concat_part_info(path: Path) -> tuple[int, int, float, Optional[tuple[str, str]]]:
-    """concat結合の事前検証用に、解像度・fps・音声パラメータ(あれば)を
-    1回のffprobe呼び出しでまとめて取得する(width, height, fps, (sample_rate, channels)|None)。
+@dataclass
+class ConcatPartInfo:
+    width: int
+    height: int
+    fps: float
+    fps_exact: str  # ffprobeのr_frame_rateそのまま("30000/1001"等)。-r/fps=に使うと丸め誤差を避けられる
+    audio: Optional[tuple[str, str]]  # (sample_rate, channels) | 音声なしならNone
+    duration: float
+
+
+def probe_concat_part_info(path: Path) -> ConcatPartInfo:
+    """concat結合の事前検証用に、解像度・fps・音声パラメータ・尺を
+    1回のffprobe呼び出しでまとめて取得する。
     """
     result = subprocess.run(
         ["ffprobe", "-v", "error", "-show_entries",
-         "stream=codec_type,width,height,r_frame_rate,sample_rate,channels",
+         "format=duration:stream=codec_type,width,height,r_frame_rate,sample_rate,channels",
          "-of", "json", str(path)],
         capture_output=True, text=True,
     )
@@ -437,7 +453,8 @@ def probe_concat_part_info(path: Path) -> tuple[int, int, float, Optional[tuple[
         print(f"エラー: {path} の情報を取得できませんでした。\n{result.stderr}", file=sys.stderr)
         sys.exit(1)
     try:
-        streams = json.loads(result.stdout).get("streams", [])
+        data = json.loads(result.stdout)
+        streams = data.get("streams", [])
     except json.JSONDecodeError:
         print(f"エラー: {path} のffprobe出力を解析できませんでした。", file=sys.stderr)
         sys.exit(1)
@@ -447,17 +464,27 @@ def probe_concat_part_info(path: Path) -> tuple[int, int, float, Optional[tuple[
         print(f"エラー: {path} に映像ストリームが見つかりません。", file=sys.stderr)
         sys.exit(1)
 
-    num, _, den = str(video.get("r_frame_rate", "0/0")).partition("/")
+    fps_exact = str(video.get("r_frame_rate", "0/0"))
+    num, _, den = fps_exact.partition("/")
     den_val = float(den) if den else 1.0
     if den_val == 0 or float(num) == 0:
-        print(f"エラー: {path} のfpsが不正です(r_frame_rate={video.get('r_frame_rate')})。", file=sys.stderr)
+        print(f"エラー: {path} のfpsが不正です(r_frame_rate={fps_exact})。", file=sys.stderr)
         sys.exit(1)
     fps = float(num) / den_val
 
     audio = next((s for s in streams if s.get("codec_type") == "audio"), None)
     audio_params = (str(audio.get("sample_rate")), str(audio.get("channels"))) if audio else None
 
-    return video["width"], video["height"], fps, audio_params
+    try:
+        duration = float(data.get("format", {})["duration"])
+    except (KeyError, TypeError, ValueError):
+        print(f"エラー: {path} の尺を取得できませんでした。", file=sys.stderr)
+        sys.exit(1)
+
+    return ConcatPartInfo(
+        width=video["width"], height=video["height"], fps=fps, fps_exact=fps_exact,
+        audio=audio_params, duration=duration,
+    )
 
 
 def normalize_photo(path: Path, tmp_dir: Path, idx: int) -> Path:
@@ -1415,13 +1442,9 @@ def build_film_scroll_ffmpeg_command(
     else:
         cmd += ["-an"]
 
-    cmd += [
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(cfg.fps),
-        "-preset", "medium", "-crf", "18",
-        "-profile:v", "high", "-level:v", "4.1", "-bf", "2",
-    ]
+    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(cfg.fps)] + X264_QUALITY_ARGS
     if has_audio:
-        cmd += ["-c:a", "aac", "-b:a", "192k"]
+        cmd += AAC_ENCODE_ARGS
     cmd += ["-movflags", "+faststart", "-t", f"{total_duration:.3f}", str(cfg.output_file)]
     return cmd
 
@@ -1461,13 +1484,9 @@ def build_ffmpeg_command(
     else:
         cmd += ["-an"]
 
-    cmd += [
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(cfg.fps),
-        "-preset", "medium", "-crf", "18",
-        "-profile:v", "high", "-level:v", "4.1", "-bf", "2",
-    ]
+    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(cfg.fps)] + X264_QUALITY_ARGS
     if has_audio:
-        cmd += ["-c:a", "aac", "-b:a", "192k"]
+        cmd += AAC_ENCODE_ARGS
     cmd += ["-movflags", "+faststart", "-t", f"{total_duration:.3f}", str(cfg.output_file)]
     return cmd
 
@@ -1576,10 +1595,9 @@ def run_post_effects(cfg: Config, base_video: Path, total_duration: float, tmp_d
 
     cmd += ["-filter_complex_script", str(filter_script)]
     cmd += ["-map", f"[{stage_label}]", "-map", "0:a?"]
+    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(fps)] + X264_QUALITY_ARGS
     cmd += [
-        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", str(fps),
-        "-preset", "medium", "-crf", "18",
-        "-profile:v", "high", "-level:v", "4.1", "-bf", "2", "-c:a", "copy",
+        "-c:a", "copy",
         "-movflags", "+faststart", "-t", f"{total_duration:.3f}", str(cfg.output_file),
     ]
 
@@ -1594,14 +1612,78 @@ def concat_list_escape(path: Path) -> str:
     return "'" + str(path).replace("'", "'\\''") + "'"
 
 
+def audio_channel_layout(channels: str) -> str:
+    return {"1": "mono", "2": "stereo"}.get(channels, channels)
+
+
+def normalize_concat_part(
+    path: Path, info: ConcatPartInfo, idx: int,
+    target_w: int, target_h: int, target_fps: float, target_fps_str: str,
+    target_audio: Optional[tuple[str, str]], tmp_dir: Path,
+) -> Path:
+    """1パーツだけをtarget仕様(解像度/fps/音声パラメータ)に合わせて再エンコードする。
+
+    既に仕様が揃っている他のパーツには一切手を付けない。type:videoスライドと
+    同じ規約(scale...decrease,pad...,fps,format=yuv420p,setsar=1)でレターボックス
+    する。音声を持たないパーツにtarget_audioが必要な場合は無音トラックを合成する。
+
+    fpsが変換元と異なる場合(例: 24fps動画を30fpsへ)、単純な`fps=`フィルタだけでは
+    短い動画で1フレーム不足することを実測で確認した(このプロジェクトで既に踏んだ
+    のと同じ、フレーム数が確定的に決まらないタイプの不具合)。`tpad`で末尾に
+    余分なフレームを確保してから`trim`で狙った枚数に切り詰めることで、
+    確定的なフレーム数にしている。
+    """
+    frames = max(1, round(info.duration * target_fps))
+    vf = (
+        f"scale={target_w}:{target_h}:force_original_aspect_ratio=decrease,"
+        f"pad={target_w}:{target_h}:(ow-iw)/2:(oh-ih)/2:color=black,"
+        f"fps={target_fps_str},tpad=stop_mode=clone:stop=5,"
+        f"trim=start_frame=0:end_frame={frames},setpts=PTS-STARTPTS,"
+        f"format=yuv420p,setsar=1[vout]"
+    )
+    filters = [f"[0:v]{vf}"]
+
+    cmd = ["ffmpeg", "-y", "-i", str(path)]
+    maps = ["-map", "[vout]"]
+    if target_audio is not None:
+        sr, ch = target_audio
+        layout = audio_channel_layout(ch)
+        if info.audio is not None:
+            filters.append(f"[0:a]aformat=sample_rates={sr}:channel_layouts={layout},asetpts=PTS-STARTPTS[aout]")
+        else:
+            cmd += ["-f", "lavfi", "-i", f"anullsrc=channel_layout={layout}:sample_rate={sr}"]
+            filters.append(f"[1:a]atrim=duration={info.duration:.3f},asetpts=PTS-STARTPTS[aout]")
+        maps += ["-map", "[aout]"]
+
+    filter_script = tmp_dir / f"concat_normalize_{idx}_filter.txt"
+    filter_script.write_text(";\n".join(filters), encoding="utf-8")
+
+    out_path = tmp_dir / f"concat_normalized_{idx}.mp4"
+    cmd += ["-filter_complex_script", str(filter_script)] + maps
+    cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-r", target_fps_str] + X264_QUALITY_ARGS
+    if target_audio is not None:
+        cmd += AAC_ENCODE_ARGS
+    cmd += ["-movflags", "+faststart", str(out_path)]
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+    if result.returncode != 0 or not out_path.exists():
+        print(f"エラー: concat[{idx}]({path})の事前調整に失敗しました。\n{result.stderr}", file=sys.stderr)
+        sys.exit(1)
+    return out_path
+
+
 def run_concat_job(config_path: Path, raw: dict, allow_outside_assets: bool, dry_run: bool) -> None:
     """既にbuild_video.pyで生成済みの動画ファイル(パーツ)を1本に結合するモード。
 
     5分を超えるような長い動画を1回のslides.yamlで作ろうとすると、写真の指定枚数が
     膨大になり差し替え時の見通しが悪くなる。そこで、パーツごとに通常通り
     (`slides:`を使って)動画を作っておき、それらをこのモードで結合する2段階構成を
-    取れるようにする。既定ではハードカットのみ(ffmpegのconcatデマルサで
-    再エンコードなしにストリームコピー結合)。パーツ間クロスフェードは非対応。
+    取れるようにする。結合そのものは常にffmpegのconcatデマルサ(ストリームコピー、
+    ハードカットのみ、パーツ間クロスフェードは非対応)で行う。解像度/fps/音声
+    パラメータが揃っていないパーツがあれば、そのパーツだけを事前にtarget仕様へ
+    再エンコードしてから同じデマルサに渡す(揃っているパーツは無変更のまま
+    ストリームコピーされるため、一部だけ仕様違いのケースでも全体を再エンコード
+    しない)。
     """
     base_dir = config_path.resolve().parent.parent
     output_root = (base_dir / "output").resolve()
@@ -1631,28 +1713,87 @@ def run_concat_job(config_path: Path, raw: dict, allow_outside_assets: bool, dry
     if output_file in parts:
         fail(f"output.file が concat のパーツと同じファイルを指しています: {output_file}")
 
-    ref_w, ref_h, ref_fps, ref_audio = probe_concat_part_info(parts[0])
-    for path in parts[1:]:
-        w, h, fps, audio = probe_concat_part_info(path)
-        if (w, h) != (ref_w, ref_h):
+    strict = bool(raw.get("strict", False))
+    infos = [probe_concat_part_info(p) for p in parts]
+
+    # 明示指定があればbounded()で検証して使い、無ければ先頭パーツの値を既定にする。
+    if out.get("width") is not None:
+        target_w = bounded(int(out["width"]), 64, 7680, "output.width")
+    else:
+        target_w = infos[0].width
+    if out.get("height") is not None:
+        target_h = bounded(int(out["height"]), 64, 7680, "output.height")
+    else:
+        target_h = infos[0].height
+    # yuv420pはチャネルが偶数である必要があるため丸める。
+    target_w = max(target_w // 2 * 2, 2)
+    target_h = max(target_h // 2 * 2, 2)
+
+    if out.get("fps") is not None:
+        target_fps_val = bounded(float(out["fps"]), 1, 120, "output.fps")
+        target_fps = target_fps_val
+        target_fps_str = str(int(target_fps_val)) if target_fps_val == int(target_fps_val) else str(target_fps_val)
+    else:
+        # 先頭パーツのfpsをそのまま使う場合はffprobeの元の分数表記
+        # (例: "30000/1001")を使い、小数への丸めによる精度劣化を避ける。
+        target_fps = infos[0].fps
+        target_fps_str = infos[0].fps_exact
+
+    # 音声ターゲット: 音声を持つパーツが全て同じパラメータなら維持し、無駄な
+    # 再サンプルを避ける。混在・不一致がある場合のみ48000Hz/stereoに統一する。
+    audio_specs = [info.audio for info in infos if info.audio is not None]
+    if not audio_specs:
+        target_audio = None
+    elif all(a == audio_specs[0] for a in audio_specs):
+        target_audio = audio_specs[0]
+    else:
+        target_audio = ("48000", "2")
+
+    mismatches: list[tuple[Path, list[str]]] = []
+    for path, info in zip(parts, infos):
+        reasons = []
+        if (info.width, info.height) != (target_w, target_h):
+            reasons.append(f"解像度{info.width}x{info.height}≠{target_w}x{target_h}")
+        if abs(info.fps - target_fps) > 0.01:
+            reasons.append(f"fps{info.fps:.3f}≠{target_fps:.3f}")
+        if info.audio != target_audio:
+            reasons.append(f"音声{info.audio or 'なし'}≠{target_audio or 'なし'}")
+        if reasons:
+            mismatches.append((path, reasons))
+
+    if mismatches:
+        detail = "\n".join(f"  - {p}: {', '.join(r)}" for p, r in mismatches)
+        if strict:
             fail(
-                f"concatする動画の解像度が揃っていません: {parts[0]}({ref_w}x{ref_h}) "
-                f"vs {path}({w}x{h})"
+                f"concatする動画の仕様が揃っていません(strict: trueのため拒否):\n{detail}\n"
+                "揃えて結合したい場合は strict: false(既定)にしてください。"
             )
-        if abs(fps - ref_fps) > 0.01:
-            fail(f"concatする動画のfpsが揃っていません: {parts[0]}({ref_fps}) vs {path}({fps})")
-        if audio != ref_audio:
-            fail(
-                f"concatする動画の音声パラメータ(サンプルレート/チャンネル数)が揃っていません: "
-                f"{parts[0]}({ref_audio or 'なし'}) vs {path}({audio or 'なし'})"
-            )
+        print(
+            f"注記: 以下のパーツは目標仕様({target_w}x{target_h} @ {target_fps:.3f}fps、"
+            f"音声{target_audio or 'なし'})と異なるため、個別に再エンコードしてから結合します:\n{detail}",
+            file=sys.stderr,
+        )
 
     output_file.parent.mkdir(parents=True, exist_ok=True)
+    mismatched = {p for p, _ in mismatches}
 
     with tempfile.TemporaryDirectory(prefix="slideshow_concat_") as tmp:
-        list_file = Path(tmp) / "concat_list.txt"
+        tmp_dir = Path(tmp)
+
+        final_parts = []
+        for i, (path, info) in enumerate(zip(parts, infos)):
+            if path in mismatched:
+                final_parts.append(
+                    normalize_concat_part(
+                        path, info, i, target_w, target_h, target_fps, target_fps_str, target_audio, tmp_dir
+                    )
+                )
+            else:
+                final_parts.append(path)
+
+        list_file = tmp_dir / "concat_list.txt"
         list_file.write_text(
-            "\n".join(f"file {concat_list_escape(p)}" for p in parts) + "\n", encoding="utf-8"
+            "\n".join(f"file {concat_list_escape(p)}" for p in final_parts) + "\n", encoding="utf-8"
         )
 
         cmd = [
