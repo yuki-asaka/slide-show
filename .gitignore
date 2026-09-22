@@ -10,3 +10,8 @@ config/*.yaml
 # 生成物（個人情報を含む）はコミットしない
 output/*
 !output/.gitkeep
+
+# generate_video.py が生成するダミー素材・中間ファイル
+materials/
+.captions/
+.render_units/
